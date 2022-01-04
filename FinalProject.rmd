@@ -1,0 +1,154 @@
+---
+title: "Practical Machine Learning Final Project"
+author: "Lucas Falcao Monteiro"
+date: "04/01/2022"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Predicting exercise quality from tracking devices
+
+## Introduction
+
+The new found availability of various types of data has enabled analyses that surpass our previous capabilities. For example, in the field of athletics, we were previously concerned with tracking the amount of exercise that someone did, but now we are able to measure how well the person does exercises based on tracking device data (e.g. Fitbit, Nike Fuelband or other personal activity equipment.)
+
+In this project I will analyze data kindly offered by PUC Rio scholars (<http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har>) where data about movement contains the classification regarding the quality of such movement. I will try to build a prediction model from the training data and use it to predict the quality of movement in the testing set.
+
+## Setting up the environment
+
+The first step is to import the packages that are needed for the analyses.
+
+```{r, echo=FALSE}
+library(caret)
+library(parallel)
+library(doParallel)
+```
+
+## Importing the data
+
+We can import the data as data frames using the read.csv command.
+
+```{r}
+pml_training <- read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv')
+pml_testing <- read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv')
+
+```
+
+## Cleaning the data
+
+This dataset contains 160 columns, and not all of them contain information. We can remove some of them to facilitate our analysis.
+
+```{r}
+empty_columns <- sapply(pml_testing, function(x) all(is.na(x) | x ==''))
+pml_testing <- pml_testing[,!empty_columns]
+columns_to_get <- c(names(pml_testing),'classe')
+pml_training <- pml_training[,colnames(pml_training) %in% columns_to_get]
+```
+
+This decreases the number of columns (and possible predictors) to 60.
+
+## Exploratory Analysis
+An interesting question upfront is about the types of each column.
+
+```{r}
+sapply(pml_testing,class)
+```
+Most of them seem to be numbers except for a few descriptor columns (e.g. name, timestamp). We can also exclude these first 7 columns because we do not want them to be used as predictors.
+```{r}
+pml_testing <- pml_testing[-c(1:7)]
+pml_training <- pml_training[-c(1:7)]
+```
+
+Also, the outcome variable should to be classified as a factor.
+
+```{r}
+pml_training$classe <- as.factor(pml_training$classe)
+```
+
+
+## Model building
+To create and later evaluate models for predicting the quality of the movements I will start by dividing the training set into three sets: training, testing and validation.
+
+```{r}
+set.seed(1814)
+traintestindex <- createDataPartition(pml_training$classe,p=0.77,list=FALSE)
+validation <- pml_training[-traintestindex,]
+traintest <- pml_training[traintestindex,]
+trainindex <- createDataPartition(traintest$classe, p=0.77, list =FALSE)
+training <- traintest[trainindex,]
+testing <- traintest[-trainindex,]
+rm(list=c('traintest','traintestindex','trainindex'))
+```
+
+We can use the Caret package to fit different machine learning models. I will choose four boosting models.
+
+```{r, cache=TRUE}
+cluster <- makeCluster(detectCores()-1)
+registerDoParallel(cluster)
+fitControl <- trainControl(method = "cv",
+number = 5,
+allowParallel = TRUE)
+
+gbmmodel <- train(classe~.,data=training,model='gbm',trControl=fitControl)
+gbmpred <- predict(gbmmodel,training)
+mboostmodel <- train(classe~.,data=training,model='glmboost',trControl=fitControl)
+mboostpred <- predict(mboostmodel,training)
+adamodel <- train(classe~.,data=training,model='adaboost',trControl=fitControl)
+adapred <- predict(adamodel,training)
+gamboostmodel <- train(classe~.,data=training,model='gamboost',trControl=fitControl)
+gampred <- predict(gamboostmodel,training)
+
+```
+
+I will also build a random forest model to stack these models and possibly get a better, ensemble prediction.
+
+```{r}
+DF <- data.frame(gbmpred,mboostpred,adapred,gampred,classe=training$classe)
+stackedmodel <- train(classe~.,data=DF,model='rf',trControl=fitControl)
+stopCluster(cluster)
+registerDoSEQ()
+```
+
+
+## Model testing and validation
+We can choose one of these models according to their accuracy when predicting on the testing set.
+
+```{r}
+gbmpred <- predict(gbmmodel,testing)
+mboostpred <- predict(mboostmodel,testing)
+gampred <- predict(gamboostmodel,testing)
+adapred <- predict(adamodel,testing)
+DF <- data.frame(gbmpred,mboostpred,adapred,gampred,classe=testing$classe)
+stackedpred <- predict(stackedmodel,DF)
+```
+
+Building a data frame with the accuracy for each model:
+
+```{r}
+gbmaccuracy <- confusionMatrix(gbmpred,testing$classe)$overall[1]
+mboostaccuracy <- confusionMatrix(mboostpred,testing$classe)$overall[1]
+gamaccuracy <- confusionMatrix(gampred,testing$classe)$overall[1]
+adaaccuracy <- confusionMatrix(adapred,testing$classe)$overall[1]
+stackedaccuracy <- confusionMatrix(stackedpred,testing$classe)$overall[1]
+DF <- data.frame(gbmaccuracy,mboostaccuracy,gamaccuracy,adaaccuracy,stackedaccuracy)
+print(DF)
+```
+
+All of these models are highly accurate. For simplicity, we will use the ADA Boost model. We can estimate the out of sample error rate with the validation test set.
+
+```{r}
+validationpred <- predict(adamodel,validation)
+print(confusionMatrix(validationpred,validation$classe)$overall[1])
+```
+Calculating results for the test set for the quiz:
+```{r}
+predict(adamodel,pml_testing)
+```
+
+## Conclusion
+Boosting methods, those that use possibly weak predictors to build a model, were sufficiently accurate for this problem — it was able to predict all of the items on the quiz correctly!
